@@ -1,0 +1,18 @@
+{
+  "name": "reddit-discord-fix",
+  "version": "1.0.0",
+  "description": "Discord-friendly Reddit embed proxy, like FixupX for Reddit links.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test:mock": "node -e \"process.env.MOCK_REDDIT='true'; import('./src/server.js')\""
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.3.0",
+    "fastify": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

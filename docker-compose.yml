@@ -1,0 +1,17 @@
+services:
+  reddit-discord-fix:
+    build: .
+    container_name: reddit-discord-fix
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      BASE_URL: ${BASE_URL:-http://localhost:3000}
+      REDIRECT_BROWSERS: ${REDIRECT_BROWSERS:-true}
+      CACHE_TTL_MS: ${CACHE_TTL_MS:-300000}
+      FETCH_TIMEOUT_MS: ${FETCH_TIMEOUT_MS:-8000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1 minute}
