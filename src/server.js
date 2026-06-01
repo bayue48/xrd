@@ -111,24 +111,45 @@ async function getCachedPost(path) {
 async function fetchRedditPost(path) {
   if (MOCK_REDDIT) return mockRedditPost(path);
 
+  const urls = [
+    `https://www.reddit.com${path}.json?raw_json=1`,
+    `https://old.reddit.com${path}.json?raw_json=1`,
+  ];
+
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36 reddit-discord-fix/1.0',
+    Accept: 'application/json,text/html;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
+  const errors = [];
+  for (const url of urls) {
+    try {
+      const json = await fetchJson(url, headers);
+      const post = json?.[0]?.data?.children?.[0]?.data;
+      if (!post) throw new Error('Missing Reddit post payload');
+      return post;
+    } catch (err) {
+      errors.push(`${url}: ${err.message}`);
+    }
+  }
+
+  throw new Error(errors.join(' | '));
+}
+
+async function fetchJson(url, headers) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    const url = `https://www.reddit.com${path}.json?raw_json=1`;
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        'User-Agent': 'reddit-discord-fix/1.0 (+https://github.com/local/reddit-discord-fix)',
-        Accept: 'application/json',
-      },
+      headers,
+      redirect: 'follow',
     });
 
     if (!res.ok) throw new Error(`Reddit HTTP ${res.status}`);
-    const json = await res.json();
-    const post = json?.[0]?.data?.children?.[0]?.data;
-    if (!post) throw new Error('Missing Reddit post payload');
-    return post;
+    return await res.json();
   } finally {
     clearTimeout(timeout);
   }
