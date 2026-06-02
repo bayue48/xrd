@@ -336,7 +336,7 @@ function buildEmbed(post, originalUrl) {
   return {
     title,
     description: text ? truncate(text, 280) : description,
-    siteName: 'Reddit',
+    siteName: 'Reddit / xrd',
     url: originalUrl,
     image: media.image,
     video: media.video,
