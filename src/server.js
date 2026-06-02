@@ -1,6 +1,10 @@
 import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+
+await loadDotEnv();
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -8,8 +12,9 @@ const BASE_URL = (process.env.BASE_URL ?? `http://localhost:${PORT}`).replace(/\
 const REDIRECT_BROWSERS = process.env.REDIRECT_BROWSERS !== 'false';
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS ?? 5 * 60 * 1000);
 const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS ?? 8000);
-const MOCK_REDDIT = process.env.MOCK_REDDIT === 'true';
+const MOCK_REDDIT = ['1', 'true', 'yes'].includes(String(process.env.MOCK_REDDIT ?? '').toLowerCase());
 
+let REDDIT_COOKIES = '';
 const DISCORD_UA = /Discordbot|Twitterbot|facebookexternalhit|Slackbot|TelegramBot|WhatsApp/i;
 const cache = new Map();
 
@@ -17,6 +22,16 @@ export const app = Fastify({
   logger: true,
   trustProxy: true,
 });
+
+// Load cookies from file/URL at startup
+try {
+  REDDIT_COOKIES = await loadRedditCookies(process.env.REDDIT_COOKIES ?? '');
+  if (REDDIT_COOKIES) {
+    console.log('[Cookies] Loaded from', process.env.REDDIT_COOKIES.slice(0, 10));
+  }
+} catch (err) {
+  console.warn('[Cookies] Failed to load:', err.message);
+}
 
 await app.register(rateLimit, {
   max: Number(process.env.RATE_LIMIT_MAX ?? 120),
@@ -109,20 +124,27 @@ async function getCachedPost(path) {
 }
 
 async function fetchRedditPost(path) {
-  if (MOCK_REDDIT) return mockRedditPost(path);
+  if (MOCK_REDDIT || isMockPath(path)) return mockRedditPost(path);
+
+  const errors = [];
 
   const urls = [
+    `https://oauth.reddit.com${path}.json?raw_json=1`,
     `https://www.reddit.com${path}.json?raw_json=1`,
     `https://old.reddit.com${path}.json?raw_json=1`,
   ];
 
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36 reddit-discord-fix/1.0',
+    'User-Agent': redditUserAgent(),
     Accept: 'application/json,text/html;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
+    ...redditCookieHeaders(),
   };
 
-  const errors = [];
+  console.log(`[Fetch] Attempting Reddit URLs: ${urls.join(', ')}`);
+  console.log(`[Fetch] Using headers: ${JSON.stringify(headers)}`);
+  console.log(`[Fetch] Cookies present: ${!!REDDIT_COOKIES}`);
+
   for (const url of urls) {
     try {
       const json = await fetchJson(url, headers);
@@ -135,6 +157,129 @@ async function fetchRedditPost(path) {
   }
 
   throw new Error(errors.join(' | '));
+}
+
+function redditUserAgent() {
+  return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+}
+
+async function loadDotEnv() {
+  try {
+    const text = await readFile(resolve('.env'), 'utf-8');
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const index = line.indexOf('=');
+      if (index === -1) continue;
+      const key = line.slice(0, index).trim();
+      const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+      if (key && process.env[key] === undefined) process.env[key] = value;
+    }
+  } catch {}
+}
+
+async function loadRedditCookies(envValue) {
+  if (!envValue.trim()) return '';
+
+  const trimmed = normalizeCookieSource(envValue.trim());
+  let content = '';
+
+  if (isCookieHeader(trimmed)) return parseRedditCookies(trimmed);
+
+  // Check if it's a URL
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const res = await fetch(trimmed, {
+        signal: controller.signal,
+        headers: { 'User-Agent': redditUserAgent() },
+      }).finally(() => clearTimeout(timeout));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      content = await res.text();
+    } catch (err) {
+      throw new Error(`Failed to fetch cookies from ${trimmed}: ${err.message}`);
+    }
+  } else {
+    // Try as file path
+    try {
+      const filePath = resolve(trimmed);
+      content = await readFile(filePath, 'utf-8');
+    } catch (err) {
+      throw new Error(`Failed to read cookies from ${trimmed}: ${err.message}`);
+    }
+  }
+
+  return parseRedditCookies(content);
+}
+
+function normalizeCookieSource(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return value;
+  }
+
+  if (url.hostname !== 'drive.google.com') return value;
+
+  const id = url.searchParams.get('id')?.replace(/^d\//, '');
+  const fileMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
+  const fileId = id || fileMatch?.[1];
+
+  return fileId ? `https://drive.google.com/uc?export=download&id=${fileId}` : value;
+}
+
+function isCookieHeader(value) {
+  return /^[^=\s;]+=[^;\r\n]*(?:;\s*[^=\s;]+=[^;\r\n]*)*;?$/.test(value.trim());
+}
+
+function parseRedditCookies(content) {
+  if (!content.trim()) return '';
+  if (/<!doctype html|<html/i.test(content)) throw new Error('Cookie source returned HTML, not a cookies.txt file');
+
+  if (isCookieHeader(content)) {
+    return content
+      .split(';')
+      .map(part => part.trim())
+      .filter(Boolean)
+      .join('; ');
+  }
+
+  // Try JSON first (legacy format)
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed === 'object' && parsed !== null) {
+      return Object.entries(parsed)
+        .map(([key, val]) => `${key}=${val}`)
+        .join('; ');
+    }
+  } catch {}
+
+  // Parse Netscape format cookies
+  // Format: domain flag path secure expiry name value
+  const lines = content.split('\n').filter(line => {
+    const trimmed = line.trim();
+    return trimmed && !trimmed.startsWith('#');
+  });
+
+  const cookies = lines
+    .map(line => {
+      const parts = line.split('\t');
+      if (parts.length < 7) return null;
+      const [domain, , , , , name, value] = parts;
+      if (!domain || !name || !value) return null;
+      // Keep only Reddit cookies
+      if (!domain.includes('reddit.com')) return null;
+      return { name, value };
+    })
+    .filter(Boolean);
+
+  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+}
+
+function redditCookieHeaders() {
+  return REDDIT_COOKIES ? { Cookie: REDDIT_COOKIES } : {};
 }
 
 async function fetchJson(url, headers) {
@@ -153,6 +298,10 @@ async function fetchJson(url, headers) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function isMockPath(path) {
+  return /\/r\/test\/comments\/mockid\//i.test(path) || /\/comments\/mockid\//i.test(path);
 }
 
 function mockRedditPost(path) {

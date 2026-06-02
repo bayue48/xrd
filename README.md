@@ -55,6 +55,38 @@ Copy `.env.example` values into your host env.
 | `RATE_LIMIT_MAX` | `120` | requests/window |
 | `RATE_LIMIT_WINDOW` | `1 minute` | Fastify rate limit window |
 | `MOCK_REDDIT` | `false` | use built-in mock Reddit response for local/offline tests |
+| `REDDIT_COOKIES` | empty | optional Reddit cookies for hosts/IPs that get `403`; accepts raw `Cookie` header, cookie file path, JSON, Netscape cookies, or URL |
+
+## Reddit 403 / API limits
+
+Public Reddit JSON endpoints may return `403` from some hosts/IPs. This app uses Reddit's unauthenticated JSON endpoints with a descriptive `User-Agent`.
+
+If Reddit still returns `403`, set `REDDIT_COOKIES`.
+
+Raw browser `Cookie` header:
+
+```bash
+REDDIT_COOKIES="loid=...; session_tracker=...; reddit_session=..."
+pnpm start
+```
+
+Cookie file path:
+
+```bash
+REDDIT_COOKIES="./cookies.txt"
+pnpm start
+```
+
+Supported `REDDIT_COOKIES` inputs:
+
+- raw `Cookie` header: `a=b; c=d`
+- plain cookie file
+- Netscape cookie export
+- JSON object: `{"a":"b"}`
+- JSON array: `[{"name":"a","value":"b"}]`
+- `http(s)` URL returning any supported cookie format
+
+Security: Reddit cookies grant account access. Do not commit them, paste them in logs, or expose them in hosting dashboards.
 
 ## Supported Reddit URLs
 
