@@ -17,6 +17,7 @@ const MOCK_REDDIT = ['1', 'true', 'yes'].includes(String(process.env.MOCK_REDDIT
 let REDDIT_COOKIES = '';
 const DISCORD_UA = /Discordbot|Twitterbot|facebookexternalhit|Slackbot|TelegramBot|WhatsApp/i;
 const cache = new Map();
+const shortLinkCache = new Map();
 
 export const app = Fastify({
   logger: true,
@@ -51,7 +52,19 @@ app.get('/*', async (req, reply) => {
 });
 
 async function handleRedditPath(req, reply, inputPath) {
-  const parsed = parseRedditPath(inputPath);
+  // Resolve Reddit short share links (/r/<sub>/s/<token> or /s/<token>)
+  let resolvedPath = inputPath;
+  const shortMatch = inputPath.match(/^\/(?:r\/[A-Za-z0-9_]+\/)?s\/([A-Za-z0-9]+)\/?$/);
+  if (shortMatch) {
+    try {
+      resolvedPath = await resolveShortLink(inputPath);
+    } catch (err) {
+      req.log.error(err);
+      return renderError(reply, 502, 'Short link resolve failed', 'Could not follow this Reddit short link.');
+    }
+  }
+
+  const parsed = parseRedditPath(resolvedPath);
   if (!parsed.ok) return renderError(reply, 400, 'Invalid Reddit URL', 'Use a reddit.com post/comment URL.');
 
   const originalUrl = `https://www.reddit.com${parsed.path}`;
@@ -101,7 +114,51 @@ function normalizeRedditUrlToPath(value) {
     return id ? `/comments/${id}/` : '';
   }
 
+  // Pass short share links through for later async resolution
+  if (/^\/(?:r\/[A-Za-z0-9_]+\/)?s\/[A-Za-z0-9]+\/?$/.test(url.pathname)) {
+    return url.pathname;
+  }
+
   return url.pathname;
+}
+
+async function resolveShortLink(shortPath) {
+  const key = shortPath;
+  const now = Date.now();
+  const hit = shortLinkCache.get(key);
+  if (hit && hit.expiresAt > now) return hit.value;
+  if (hit) shortLinkCache.delete(key);
+
+  const shortUrl = `https://www.reddit.com${shortPath}`;
+  console.log(`[ShortLink] Resolving: ${shortUrl}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  let resolved;
+  try {
+    const res = await fetch(shortUrl, {
+      signal: controller.signal,
+      redirect: 'manual',
+      headers: {
+        'User-Agent': redditUserAgent(),
+        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+        ...redditCookieHeaders(),
+      },
+    });
+
+    const location = res.headers.get('location');
+    if (!location) throw new Error(`No redirect from short link (status ${res.status})`);
+
+    const redirectUrl = new URL(location, 'https://www.reddit.com');
+    resolved = redirectUrl.pathname;
+    console.log(`[ShortLink] Resolved to: ${resolved}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  shortLinkCache.set(key, { value: resolved, expiresAt: now + CACHE_TTL_MS });
+  return resolved;
 }
 
 async function getCachedPost(path) {
